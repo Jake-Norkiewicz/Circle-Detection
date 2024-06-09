@@ -2,6 +2,7 @@ import cv2 as cv
 import numpy as np
 from djitellopy.tello import Tello
 from ultralytics import YOLO
+from ultralytics.utils.plotting import Annotator
 from enum import Enum
 
 class TelloState(Enum):
@@ -9,10 +10,12 @@ class TelloState(Enum):
     FLYING = 1
     LANDING = 2
 
+
 class TelloMission(Enum):
     NONE = 0
     DETECT = 1
     FLY = 2
+
 
 class TelloDrone():
     def __init__(self) -> None:
@@ -25,6 +28,7 @@ class TelloDrone():
 
         self.circle_params = []
         self.drone_frame = None
+        self.middle_x = None
         self.drone.streamon()
 
 
@@ -53,26 +57,21 @@ class TelloDrone():
         self.drone.streamoff()
 
 
-    def show_camera(self, delay: int = 0) -> None:
-        temperature = self.check_temperature()
-        battery = self.check_battery()
+    def two_circles(self) -> bool:
+        return self.circle_count == 2
 
+
+    def show_camera(self, delay: int = 1) -> None:
         HEIGHT, WIDTH = self.drone_frame.shape[0:2]
         CYAN, RED, GREEN, SCALE, FONT, THICKNESS = (150, 150, 10), (0, 0, 255), (0, 255, 0), 2.5, cv.FONT_HERSHEY_PLAIN, 4
 
-        state_pos = (int(0.01 * WIDTH), int(0.05 * HEIGHT))
-        mission_pos = (int(0.01 * WIDTH), int(0.12 * HEIGHT))
-        circle_count_pos = (int(0.01 * WIDTH), int(0.19 * HEIGHT))
-        temp_pos = (int(0.75 * WIDTH), int(0.05 * HEIGHT))
-        bat_pos = (int(0.83 * WIDTH), int(0.12 * HEIGHT))
-        land_pos = (int(0.36 * WIDTH), int(0.9 * HEIGHT))
+        state_pos, mission_pos = (int(0.01 * WIDTH), int(0.05 * HEIGHT)), (int(0.01 * WIDTH), int(0.12 * HEIGHT))
+        circle_count_pos, temp_pos = (int(0.01 * WIDTH), int(0.19 * HEIGHT)), (int(0.75 * WIDTH), int(0.05 * HEIGHT))
+        bat_pos, land_pos = (int(0.83 * WIDTH), int(0.12 * HEIGHT)), (int(0.36 * WIDTH), int(0.9 * HEIGHT))
 
-        state_text = f"STATE: {self.state.name}"
-        mission_text = f"MISSION: {self.mission.name}"
-        circle_count_text = f"COUNT: {self.circle_count}"
-        temp_text = f"TEMP: {temperature}"
-        bat_text = f"BAT: {battery}"
-        land_text = "LAND ASAP"
+        state_text, mission_text = f"STATE: {self.state.name}", f"MISSION: {self.mission.name}"
+        mission_text, circle_count_text = f"MISSION: {self.mission.name}", f"COUNT: {self.circle_count}"
+        temp_text, bat_text, land_text = f"TEMP: {self.check_temperature()}", f"BAT: {self.check_battery()}", "LAND ASAP"
 
         cv.putText(self.drone_frame, state_text, state_pos, FONT, SCALE, CYAN, THICKNESS)
         cv.putText(self.drone_frame, mission_text, mission_pos, FONT, SCALE, CYAN, THICKNESS)
@@ -80,42 +79,25 @@ class TelloDrone():
 
         # If critical value of temperature or battery is exceeded, show it in red
 
-        if temperature < 90:
+        if self.check_temperature() < 90:
             cv.putText(self.drone_frame, temp_text, temp_pos, FONT, SCALE, CYAN, THICKNESS)
-
         else:
             cv.putText(self.drone_frame, temp_text, temp_pos, FONT, SCALE, RED, THICKNESS)
             cv.putText(self.drone_frame, land_text, land_pos, FONT, 3.0, RED, THICKNESS)
 
-        if battery > 20:
+        if self.check_battery() > 20:
             cv.putText(self.drone_frame, bat_text, bat_pos, FONT, SCALE, CYAN, THICKNESS)
-
         else:
             cv.putText(self.drone_frame, bat_text, bat_pos, FONT, SCALE, RED, THICKNESS)
             cv.putText(self.drone_frame, land_text, land_pos, FONT, 3.0, RED, THICKNESS)
 
         # Draw circles on the current frame
-
-        for circle in self.circle_params:
-            center_x, center_y, radius, conf=circle[:]
-            cv.circle(self.drone_frame, (center_x, center_y), radius, GREEN, 2)
+        self.draw_circles()
 
         # Draw a horizontal and vertical line between the only two circles
-
-        if self.circle_count == 2:
-            center_1x, center_1y = self.circle_params[0][0:2]
-            center_2x, center_2y = self.circle_params[1][0:2]
-
-            line_len = round(np.sqrt(pow((center_1x - center_2x), 2) + pow((center_1y - center_2y), 2)))
-            half_len = round(0.5 * line_len)
-
-            cv.line(self.drone_frame, (center_1x, center_1y), (center_2x, center_2y), GREEN, 2)
-            cv.line(self.drone_frame, (int(0.5 * (center_1x + center_2x)), int(0.5 * (center_1y + center_2y)) - half_len),
-                    (int(0.5 * (center_1x + center_2x)), int(0.5 * (center_1y + center_2y)) + half_len), GREEN, 2)
-            cv.circle(self.drone_frame, (int(0.5 * (center_1x + center_2x)), int(0.5 * (center_1y + center_2y))), 4, RED, -1)
+        self.draw_lines()
 
         # Show current frame with all annotations
-
         cv.imshow("Drone Camera", self.drone_frame)
         cv.waitKey(delay = delay)
 
@@ -127,21 +109,26 @@ class TelloDrone():
 
         self.circle_count = 0
         self.circle_params = []
+        self.middle_x = None
 
         # Canny by default returns a single-channel image
 
         canny = cv.Canny(self.drone_frame, threshold1 = 250, threshold2 = 250)
         canny = cv.cvtColor(canny, cv.COLOR_GRAY2BGR)
 
+        # Predict on the canny image (3-channel)
+
         results = model(canny, conf = 0.7)
 
         for result in results:
             boxes_xyxy = result.boxes.xyxy.cpu().numpy()
             boxes_conf = result.boxes.conf.cpu().numpy()
+            #annotator = Annotator(self.drone_frame)
 
             for box, conf in zip(boxes_xyxy, boxes_conf):
                 x1, y1, x2, y2 = box[:]
                 conf = round(float(conf), 2)
+                #annotator.box_label(box, f"circle {conf}")
 
                 radius_x = 0.5 * (x2 - x1)
                 radius_y = 0.5 * (y2 - y1)
@@ -152,6 +139,39 @@ class TelloDrone():
 
                 self.circle_params.append((center_x, center_y, radius, conf))
                 self.circle_count = len(boxes_xyxy)
+
+        if self.circle_count == 2:
+            center_1x = self.circle_params[0][0]
+            center_2x = self.circle_params[1][0]
+
+            self.middle_x = round(0.5 * (center_1x + center_2x))
+
+
+    def draw_circles(self) -> None:
+        for circle in self.circle_params:
+            center_x, center_y, radius, conf = circle[:]
+            cv.circle(self.drone_frame, (center_x, center_y), radius, (255, 255, 0), 2)
+
+    def draw_lines(self) -> None:
+        # Lines are drawn only when we are having two circles being detected
+
+        if self.circle_count == 2:
+            center_1x, center_1y = self.circle_params[0][0:2]
+            center_2x, center_2y = self.circle_params[1][0:2]
+
+            # A connecting line is drawn between the centers of the two main circles
+            # Just for aesthetics the length of the vertical line is equal to the length of the connecting line
+
+            line_len = np.sqrt(pow((center_1x - center_2x), 2) + pow((center_1y - center_2y), 2))
+            half_len = round(0.5 * line_len)
+
+            GREEN, RED = (0, 255, 0), (0, 0, 255)
+
+            cv.line(self.drone_frame, (center_1x, center_1y), (center_2x, center_2y), GREEN, 2)
+            cv.line(self.drone_frame, (int(0.5 * (center_1x + center_2x)), int(0.5 * (center_1y + center_2y)) - half_len),
+                    (int(0.5 * (center_1x + center_2x)), int(0.5 * (center_1y + center_2y)) + half_len), GREEN, 2)
+            cv.circle(self.drone_frame, (int(0.5 * (center_1x + center_2x)), int(0.5 * (center_1y + center_2y))), 4, RED, -1)
+
 
 
 def main() -> None:
