@@ -1,12 +1,15 @@
 import cv2 as cv
 import numpy as np
+import keyboard
 from djitellopy.tello import Tello
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Annotator
 from enum import Enum
+from threading import Thread
+
 
 class TelloState(Enum):
-    READY = 0
+    AVAIL = 0
     FLYING = 1
     LANDING = 2
 
@@ -17,20 +20,40 @@ class TelloMission(Enum):
     FLY = 2
 
 
-class TelloDrone():
+class KillSwitch:
+    def __init__(self, drone: Tello) -> None:
+        self.drone = drone
+        kill_switch_thread = Thread(target = self.kill_check)
+        kill_switch_thread.start()
+
+    def kill_check(self):
+        while not keyboard.is_pressed("space"):
+            pass
+
+        self.drone.emergency()
+
+
+class TelloDrone:
     def __init__(self) -> None:
         self.drone = Tello()
         self.drone.connect()
 
-        self.state = TelloState.READY
+        self.state = TelloState.AVAIL
         self.mission = TelloMission.NONE
         self.circle_count = 0
-
         self.circle_params = []
-        self.drone_frame = None
-        self.middle_x = None
-        self.drone.streamon()
 
+        self.middle_x = None
+        self.drone_frame = None
+        self.console_msg = ""
+        self.drone.streamon()
+        self.kill_switch = KillSwitch(self.drone)
+
+
+    def __del__(self):
+        self.drone.streamoff()
+        cv.destroyAllWindows()
+        self.drone.end()
 
     def check_battery(self) -> int:
         return self.drone.get_battery()
@@ -40,13 +63,30 @@ class TelloDrone():
         return self.drone.get_temperature()
 
 
-    def fly(self, x: int = 0, y: int = 0, z: int = 0, yaw: int = 0) -> None:
-        self.mission = TelloMission.FLY
+    def check_yaw(self) -> int:
+        return self.drone.get_yaw() % 360
+
+
+    def fly(self, x: int, y: int, z: int, yaw: int) -> None:
+        self.mission = TelloMission.FLY if self.circle_count == 2 else TelloMission.DETECT
         self.drone.send_rc_control(y, x, z, yaw)
+
+
+    def rotate_CCW(self, angle: int) -> None:
+        self.drone.rotate_counter_clockwise(angle)
+
+
+    def rotate_CW(self, angle: int) -> None:
+        self.drone.rotate_clockwise(angle)
+
+
+    def set_console_msg(self, msg: str) -> None:
+        self.console_msg = msg
 
 
     def Takeoff(self) -> None:
         self.state = TelloState.FLYING
+        self.mission = TelloMission.DETECT
         self.drone.takeoff()
 
 
@@ -54,11 +94,14 @@ class TelloDrone():
         self.mission = TelloMission.NONE
         self.state = TelloState.LANDING
         self.drone.land()
-        self.drone.streamoff()
+        self.state = TelloState.AVAIL
 
 
-    def two_circles(self) -> bool:
-        return self.circle_count == 2
+    def camera_dimensions(self) -> tuple:
+        height = self.drone_frame[0]
+        width = self.drone_frame[1]
+
+        return width, height
 
 
     def show_camera(self, delay: int = 1) -> None:
@@ -70,23 +113,28 @@ class TelloDrone():
         bat_pos, land_pos = (int(0.83 * WIDTH), int(0.12 * HEIGHT)), (int(0.36 * WIDTH), int(0.9 * HEIGHT))
 
         state_text, mission_text = f"STATE: {self.state.name}", f"MISSION: {self.mission.name}"
-        mission_text, circle_count_text = f"MISSION: {self.mission.name}", f"COUNT: {self.circle_count}"
-        temp_text, bat_text, land_text = f"TEMP: {self.check_temperature()}", f"BAT: {self.check_battery()}", "LAND ASAP"
+        circle_count_text, temp_text = f"COUNT: {self.circle_count}", f"TEMP: {self.check_temperature()}"
+        bat_text, land_text = f"BAT: {self.check_battery()}", "LAND ASAP"
 
         cv.putText(self.drone_frame, state_text, state_pos, FONT, SCALE, CYAN, THICKNESS)
+
         cv.putText(self.drone_frame, mission_text, mission_pos, FONT, SCALE, CYAN, THICKNESS)
+
         cv.putText(self.drone_frame, circle_count_text, circle_count_pos, FONT, SCALE, CYAN, THICKNESS)
 
         # If critical value of temperature or battery is exceeded, show it in red
 
         if self.check_temperature() < 90:
             cv.putText(self.drone_frame, temp_text, temp_pos, FONT, SCALE, CYAN, THICKNESS)
+
         else:
             cv.putText(self.drone_frame, temp_text, temp_pos, FONT, SCALE, RED, THICKNESS)
             cv.putText(self.drone_frame, land_text, land_pos, FONT, 3.0, RED, THICKNESS)
 
+
         if self.check_battery() > 20:
             cv.putText(self.drone_frame, bat_text, bat_pos, FONT, SCALE, CYAN, THICKNESS)
+
         else:
             cv.putText(self.drone_frame, bat_text, bat_pos, FONT, SCALE, RED, THICKNESS)
             cv.putText(self.drone_frame, land_text, land_pos, FONT, 3.0, RED, THICKNESS)
@@ -96,6 +144,9 @@ class TelloDrone():
 
         # Draw a horizontal and vertical line between the only two circles
         self.draw_lines()
+
+        # Draw console output
+        self.draw_console()
 
         # Show current frame with all annotations
         cv.imshow("Drone Camera", self.drone_frame)
@@ -168,10 +219,21 @@ class TelloDrone():
             GREEN, RED = (0, 255, 0), (0, 0, 255)
 
             cv.line(self.drone_frame, (center_1x, center_1y), (center_2x, center_2y), GREEN, 2)
+
             cv.line(self.drone_frame, (int(0.5 * (center_1x + center_2x)), int(0.5 * (center_1y + center_2y)) - half_len),
                     (int(0.5 * (center_1x + center_2x)), int(0.5 * (center_1y + center_2y)) + half_len), GREEN, 2)
+
             cv.circle(self.drone_frame, (int(0.5 * (center_1x + center_2x)), int(0.5 * (center_1y + center_2y))), 4, RED, -1)
 
+
+    def draw_console(self):
+        HEIGHT, WIDTH = self.drone_frame.shape[0:2]
+        console_img = np.zeros(shape = (int(0.1 * HEIGHT), WIDTH, 3), dtype = np.uint8)
+
+        cv.putText(console_img, f"console message: {self.console_msg}", (int(0.02 * WIDTH), int(0.07 * HEIGHT)),
+                   cv.FONT_HERSHEY_PLAIN, 3.0, (255, 255, 255), thickness = 4)
+
+        self.drone_frame = np.concatenate((self.drone_frame, console_img), axis = 0)
 
 
 def main() -> None:
