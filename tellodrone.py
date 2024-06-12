@@ -189,7 +189,8 @@ class TelloDrone:
                 center_y = round(y1 + radius_y)
 
                 self.circle_params.append((center_x, center_y, radius, conf))
-                self.circle_count = len(boxes_xyxy)
+                
+        self.circle_count = len(self.circle_params) #CHAT GPT niby powiedział, że circle_params to jest liczba obiektów
 
         if self.circle_count == 2:
             center_1x = self.circle_params[0][0]
