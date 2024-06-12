@@ -54,13 +54,16 @@ def main() -> None:
                 break
 
         else:
+            time.sleep(2)
             drone.fly(0, 0, 0, 0)
+            print("nie powinno to byc tutaj")
 
     print("out of loop")
 
     while True:
         if drone.circle_count >= 2:
             drone.fly(15, 0, 0, 0)
+            print("leci")
 
         else:
             time.sleep(3)
