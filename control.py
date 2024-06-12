@@ -17,7 +17,7 @@ def main() -> None:
     tolerance = 20
 
     print("waiting for takeoff...")
-    time.sleep(5)
+    time.sleep(3)
 
     drone.Takeoff()
 
@@ -26,10 +26,6 @@ def main() -> None:
     camera_thread.start()
 
     time.sleep(5)
-
-    command_sent = False
-    # first_rotate = False
-    # start_time = time.time()
 
     drone.fly(0, 0, 0, 0)
 
@@ -42,16 +38,14 @@ def main() -> None:
             print("2 circles found")
 
             # go left
-            if drone.middle_x > half_width + tolerance and not command_sent:
+            if drone.middle_x > half_width + tolerance:
                 drone.fly(0, -5, 0, 0)
                 print("rotating left")
-                command_sent = True
-
+        
             # go right
-            elif drone.middle_x < half_width - tolerance and not command_sent:
+            elif drone.middle_x < half_width - tolerance:
                 drone.fly(0, 5, 0, 0)
                 print("rotating right")
-                command_sent = True
 
             # in tolerance field
             else:
